@@ -1,0 +1,4 @@
+/* Local styles kept minimal; Tailwind handles most styling. */
+body {
+    font-family: "Georgia", "Times New Roman", serif;
+}
