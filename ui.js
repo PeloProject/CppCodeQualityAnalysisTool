@@ -46,7 +46,9 @@ function CppAnalyzer() {
     const [minLines, setMinLines] = useState(5);
     const [results, setResults] = useState(null);
     const [classIssues, setClassIssues] = useState(null);
+    const [evaluation, setEvaluation] = useState(null);
     const [analyzing, setAnalyzing] = useState(false);
+    const [profile, setProfile] = useState("standard");
 
     const handleFileUpload = async (e) => {
         const uploadedFiles = Array.from(e.target.files);
@@ -70,13 +72,81 @@ function CppAnalyzer() {
     const findDuplicates = () => {
         setAnalyzing(true);
         setTimeout(() => {
-            const nextResults = CppAnalyzerCore.findDuplicates(files, minLines);
-            const nextClassIssues = CppAnalyzerCore.analyzeClasses(files);
+            const analysis = CppAnalyzerCore.evaluateCandidate(files, minLines, profile);
 
-            setResults(nextResults);
-            setClassIssues(nextClassIssues);
+            setResults(analysis.duplicates);
+            setClassIssues(analysis.classIssues);
+            setEvaluation(analysis.evaluation);
             setAnalyzing(false);
         }, 100);
+    };
+
+    const profiles = [
+        { key: "strict", label: "厳格" },
+        { key: "standard", label: "標準" },
+        { key: "lenient", label: "緩め" },
+    ];
+
+    const RadarChart = ({ scores }) => {
+        const labels = Object.keys(scores);
+        const values = labels.map((label) => scores[label]);
+        const size = 220;
+        const center = size / 2;
+        const radius = 70;
+        const angleStep = (Math.PI * 2) / labels.length;
+
+        const points = values.map((value, index) => {
+            const angle = -Math.PI / 2 + angleStep * index;
+            const r = (value / 100) * radius;
+            const x = center + r * Math.cos(angle);
+            const y = center + r * Math.sin(angle);
+            return `${x},${y}`;
+        }).join(" ");
+
+        return (
+            <svg width={size} height={size} className="mx-auto">
+                {labels.map((_, index) => {
+                    const angle = -Math.PI / 2 + angleStep * index;
+                    const x = center + radius * Math.cos(angle);
+                    const y = center + radius * Math.sin(angle);
+                    return (
+                        <line
+                            key={`axis-${index}`}
+                            x1={center}
+                            y1={center}
+                            x2={x}
+                            y2={y}
+                            stroke="rgba(255,255,255,0.25)"
+                            strokeWidth="1"
+                        />
+                    );
+                })}
+                <polygon
+                    points={points}
+                    fill="rgba(168,85,247,0.25)"
+                    stroke="rgba(168,85,247,0.8)"
+                    strokeWidth="2"
+                />
+                {labels.map((label, index) => {
+                    const angle = -Math.PI / 2 + angleStep * index;
+                    const x = center + (radius + 20) * Math.cos(angle);
+                    const y = center + (radius + 20) * Math.sin(angle);
+                    return (
+                        <text
+                            key={`label-${label}`}
+                            x={x}
+                            y={y}
+                            fill="white"
+                            fontSize="12"
+                            textAnchor="middle"
+                            dominantBaseline="middle"
+                        >
+                            {label}
+                        </text>
+                    );
+                })}
+            </svg>
+        );
     };
 
     return (
@@ -148,6 +218,22 @@ function CppAnalyzer() {
                             className="w-full"
                         />
                     </div>
+                    <div className="mb-4">
+                        <label className="block text-purple-200 mb-2 font-semibold">
+                            評価基準
+                        </label>
+                        <select
+                            value={profile}
+                            onChange={(e) => setProfile(e.target.value)}
+                            className="w-full rounded-md bg-white/10 text-white border border-white/20 px-3 py-2"
+                        >
+                            {profiles.map((p) => (
+                                <option key={p.key} value={p.key} className="text-slate-900">
+                                    {p.label}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
 
                     {files.length > 0 && (
                         <div className="mb-4">
@@ -174,6 +260,66 @@ function CppAnalyzer() {
                     </button>
                 </div>
 
+                {evaluation && (
+                    <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-6 border border-white/20">
+                        <div className="flex flex-col lg:flex-row gap-6">
+                            <div className="flex-1">
+                                <div className="flex items-center gap-3 mb-3">
+                                    <span className={`px-3 py-1 rounded-full text-sm font-bold ${evaluation.pass ? "bg-emerald-500/80" : "bg-red-500/80"} text-white`}>
+                                        {evaluation.pass ? "合格" : "不合格"}
+                                    </span>
+                                    <div className="text-3xl font-bold text-white">
+                                        {evaluation.totalScore}
+                                    </div>
+                                    <div className="text-purple-200 text-sm">
+                                        / 100
+                                    </div>
+                                </div>
+                                <div className="text-purple-200 mb-4">
+                                    コメント: <span className="text-white">{evaluation.comment}</span>
+                                </div>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                                    <div className="bg-black/30 rounded-lg p-3">
+                                        <div className="text-purple-200">総行数</div>
+                                        <div className="text-white font-bold">{evaluation.details.totalLines}</div>
+                                    </div>
+                                    <div className="bg-black/30 rounded-lg p-3">
+                                        <div className="text-purple-200">関数数</div>
+                                        <div className="text-white font-bold">{evaluation.details.totalFunctions}</div>
+                                    </div>
+                                    <div className="bg-black/30 rounded-lg p-3">
+                                        <div className="text-purple-200">平均関数行数</div>
+                                        <div className="text-white font-bold">{evaluation.details.avgFunctionLines}</div>
+                                    </div>
+                                    <div className="bg-black/30 rounded-lg p-3">
+                                        <div className="text-purple-200">最大複雑度</div>
+                                        <div className="text-white font-bold">{evaluation.details.maxComplexity}</div>
+                                    </div>
+                                    <div className="bg-black/30 rounded-lg p-3">
+                                        <div className="text-purple-200">最大ネスト</div>
+                                        <div className="text-white font-bold">{evaluation.details.maxNesting}</div>
+                                    </div>
+                                    <div className="bg-black/30 rounded-lg p-3">
+                                        <div className="text-purple-200">重複率</div>
+                                        <div className="text-white font-bold">{evaluation.details.duplicateRatio}%</div>
+                                    </div>
+                                    <div className="bg-black/30 rounded-lg p-3">
+                                        <div className="text-purple-200">神クラス疑い</div>
+                                        <div className="text-white font-bold">{evaluation.details.godClasses}</div>
+                                    </div>
+                                    <div className="bg-black/30 rounded-lg p-3">
+                                        <div className="text-purple-200">安全性指摘</div>
+                                        <div className="text-white font-bold">{evaluation.details.safetyFindings}</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="lg:w-72">
+                                <RadarChart scores={evaluation.radar} />
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {classIssues && (
                     <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-6 border border-red-500/30">
                         <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-2">
@@ -181,7 +327,7 @@ function CppAnalyzer() {
                             クラス設計の問題
                         </h2>
 
-                        <div className="grid grid-cols-3 gap-4 mb-6">
+                        <div className="grid grid-cols-4 gap-4 mb-6">
                             <div className="bg-red-600/30 rounded-lg p-4 text-center">
                                 <div className="text-3xl font-bold text-white">
                                     {classIssues.nonVirtualDestructors.length}
@@ -199,6 +345,12 @@ function CppAnalyzer() {
                                     {classIssues.longFunctions.length}
                                 </div>
                                 <div className="text-yellow-200 text-sm">長すぎる関数</div>
+                            </div>
+                            <div className="bg-purple-600/30 rounded-lg p-4 text-center">
+                                <div className="text-3xl font-bold text-white">
+                                    {classIssues.godClasses.length}
+                                </div>
+                                <div className="text-purple-200 text-sm">神クラス疑い</div>
                             </div>
                         </div>
 
@@ -286,6 +438,32 @@ function CppAnalyzer() {
                                             </div>
                                             <div className="mt-2 text-yellow-200 text-sm">
                                                 💡 長い関数は理解・保守が困難です。単一責任の原則に従って小さな関数に分割することを検討してください
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {classIssues.godClasses.length > 0 && (
+                            <div className="mt-6">
+                                <h3 className="text-xl font-bold text-purple-300 mb-3">
+                                    ⚠️ 神クラスの疑いがあるクラス
+                                </h3>
+                                <div className="space-y-3">
+                                    {classIssues.godClasses.map((issue, idx) => (
+                                        <div key={idx} className="bg-purple-900/30 rounded-lg p-4 border border-purple-500/50">
+                                            <div className="font-mono text-purple-200 mb-2">
+                                                📄 {issue.file} (行 {issue.lineNum}-{issue.endLine})
+                                            </div>
+                                            <div className="text-white mb-1">
+                                                クラス: <span className="font-bold text-purple-300">{issue.className}</span>
+                                            </div>
+                                            <div className="text-gray-300 text-sm mb-2">
+                                                関数 {issue.functionCount} / 変数 {issue.variableCount} / 総メンバ {issue.totalMembers} / 行数 {issue.totalLines}
+                                            </div>
+                                            <div className="text-purple-200 text-sm">
+                                                理由: {issue.reasons.join("、")}
                                             </div>
                                         </div>
                                     ))}
