@@ -76,11 +76,15 @@ function CppAnalyzer() {
     };
 
     const getCodeLines = (content) => {
-        return content.split("\n").map((line, idx) => ({
-            lineNum: idx + 1,
-            original: line,
-            normalized: normalizeCode(line),
-        })).filter(line => line.normalized.length > 0);
+        return content.split("\n").map((line, idx) => {
+            const normalized = normalizeCode(line);
+            return {
+                lineNum: idx + 1,
+                original: line,
+                normalized,
+                isCodeLine: normalized.length > 0,
+            };
+        });
     };
 
     const analyzeLongFunctions = () => {
@@ -305,12 +309,27 @@ function CppAnalyzer() {
                 const lines = getCodeLines(file.content);
 
                 for (let i = 0; i < lines.length; i++) {
-                    for (let length = minLines; i + length <= lines.length; length++) {
-                        const segment = lines.slice(i, i + length)
-                            .map((l) => l.normalized)
-                            .join("\n");
+                    let codeLineCount = 0;
+                    let normalizedCharCount = 0;
 
-                        if (segment.length < 20) continue;
+                    for (let j = i; j < lines.length; j++) {
+                        if (lines[j].isCodeLine) {
+                            codeLineCount += 1;
+                            normalizedCharCount += lines[j].normalized.length;
+                        }
+
+                        if (codeLineCount < minLines) {
+                            continue;
+                        }
+
+                        if (normalizedCharCount < 20) {
+                            continue;
+                        }
+
+                        const segment = lines
+                            .slice(i, j + 1)
+                            .map((l) => (l.isCodeLine ? l.normalized : "<EMPTY>"))
+                            .join("\n");
 
                         const hash = segment;
 
@@ -323,9 +342,9 @@ function CppAnalyzer() {
                             fileName: file.name,
                             filePath: file.path,
                             startLine: lines[i].lineNum,
-                            endLine: lines[i + length - 1].lineNum,
-                            code: lines.slice(i, i + length).map((l) => l.original).join("\n"),
-                            length,
+                            endLine: lines[j].lineNum,
+                            code: lines.slice(i, j + 1).map((l) => l.original).join("\n"),
+                            length: codeLineCount,
                         });
                     }
                 }
