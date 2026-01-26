@@ -520,33 +520,43 @@ class DuplicateFinder {
     static find(files, minLines) {
         const duplicates = [];
         const duplicateMap = new Map();
+        const maxSegmentsPerFile = 5000;
+        const maxSegmentsTotal = 15000;
+        let totalSegments = 0;
 
         files.forEach((file, fileIdx) => {
             const lines = CodeNormalizer.getCodeLines(file.content);
+            let segmentCount = 0;
 
             for (let i = 0; i < lines.length; i++) {
-                for (let length = minLines; i + length <= lines.length; length++) {
-                    const segment = lines
-                        .slice(i, i + length)
-                        .map((l) => l.normalized)
-                        .join("\n");
-
-                    if (segment.length < 20) continue;
-
-                    if (!duplicateMap.has(segment)) {
-                        duplicateMap.set(segment, []);
-                    }
-
-                    duplicateMap.get(segment).push({
-                        fileIdx,
-                        fileName: file.name,
-                        filePath: file.path,
-                        startLine: lines[i].lineNum,
-                        endLine: lines[i + length - 1].lineNum,
-                        code: lines.slice(i, i + length).map((l) => l.original).join("\n"),
-                        length,
-                    });
+                if (segmentCount >= maxSegmentsPerFile || totalSegments >= maxSegmentsTotal) {
+                    break;
                 }
+                if (i + minLines > lines.length) {
+                    break;
+                }
+
+                const segment = lines
+                    .slice(i, i + minLines)
+                    .map((l) => l.normalized)
+                    .join("\n");
+
+                if (segment.length < 20) continue;
+
+                if (!duplicateMap.has(segment)) {
+                    duplicateMap.set(segment, []);
+                }
+
+                duplicateMap.get(segment).push({
+                    fileIdx,
+                    fileName: file.name,
+                    filePath: file.path,
+                    startLine: lines[i].lineNum,
+                    endLine: lines[i + minLines - 1].lineNum,
+                    length: minLines,
+                });
+                segmentCount += 1;
+                totalSegments += 1;
             }
         });
 
@@ -984,16 +994,44 @@ class CandidateEvaluator {
 
 class CppAnalyzerCore {
     static evaluateCandidate(files, minLines, profileKey) {
-        const duplicates = DuplicateFinder.find(files, minLines);
-        const classIssues = ClassAnalyzer.analyze(files);
-        const functionMetrics = FunctionMetricsAnalyzer.analyze(files);
-        const safety = SafetyScanner.scan(files);
+        const stats = CppAnalyzerCore.getStats(files);
+        const useLightMode = stats.totalLines > 1200 || stats.totalBytes > 300000;
+
+        const duplicates = CppAnalyzerCore.findDuplicates(files, minLines);
+        const classIssues = useLightMode
+            ? {
+                nonVirtualDestructors: [],
+                hiddenMembers: [],
+                longFunctions: [],
+                godClasses: [],
+            }
+            : ClassAnalyzer.analyze(files);
+        const functionMetrics = useLightMode
+            ? {
+                functions: [],
+                totalFunctions: 0,
+                avgFunctionLines: 0,
+                maxFunctionLines: 0,
+                avgComplexity: 0,
+                maxComplexity: 0,
+                maxNesting: 0,
+                maxParams: 0,
+            }
+            : FunctionMetricsAnalyzer.analyze(files);
+        const safety = useLightMode
+            ? { count: 0, findings: [] }
+            : SafetyScanner.scan(files);
         const evaluation = CandidateEvaluator.evaluate(files, {
             duplicates,
             classIssues,
             functionMetrics,
             safety,
         }, profileKey);
+
+        if (useLightMode) {
+            evaluation.details.analysisMode = "light";
+            evaluation.details.analysisNote = "データ量が多いため軽量モードで評価しました。";
+        }
 
         return {
             duplicates,
@@ -1013,6 +1051,26 @@ class CppAnalyzerCore {
     }
 
     static findDuplicates(files, minLines) {
+        const totalLines = files.reduce((sum, file) => sum + file.content.split("\n").length, 0);
+        if (totalLines > 12000) {
+            return {
+                duplicates: [],
+                totalDuplicates: 0,
+                totalDuplicateLines: 0,
+                skipped: true,
+                reason: "データ量が多いため重複検出をスキップしました。",
+            };
+        }
         return DuplicateFinder.find(files, minLines);
+    }
+
+    static getStats(files) {
+        let totalLines = 0;
+        let totalBytes = 0;
+        files.forEach((file) => {
+            totalLines += file.content.split("\n").length;
+            totalBytes += file.content.length;
+        });
+        return { totalLines, totalBytes };
     }
 }

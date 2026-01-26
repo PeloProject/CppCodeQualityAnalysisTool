@@ -49,24 +49,67 @@ function CppAnalyzer() {
     const [evaluation, setEvaluation] = useState(null);
     const [analyzing, setAnalyzing] = useState(false);
     const [profile, setProfile] = useState("standard");
+    const [editor, setEditor] = useState("notepad");
+    const [sourceRoot, setSourceRoot] = useState("");
+    const [uploadWarning, setUploadWarning] = useState("");
+    const [memoryInfo, setMemoryInfo] = useState(null);
+
+    React.useEffect(() => {
+        const intervalId = setInterval(() => {
+            if (performance && performance.memory) {
+                setMemoryInfo({
+                    used: performance.memory.usedJSHeapSize,
+                    total: performance.memory.totalJSHeapSize,
+                    limit: performance.memory.jsHeapSizeLimit,
+                });
+            } else {
+                setMemoryInfo(null);
+            }
+        }, 1000);
+
+        return () => clearInterval(intervalId);
+    }, []);
 
     const handleFileUpload = async (e) => {
         const uploadedFiles = Array.from(e.target.files);
         const fileData = [];
+        const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
+        const MAX_TOTAL_LINES = 10000;
+        const MAX_FILE_BYTES = 5 * 1024 * 1024;
+        let totalBytes = 0;
+        let totalLines = 0;
+        let warning = "";
 
         for (const file of uploadedFiles) {
             if (file.name.endsWith(".cpp") || file.name.endsWith(".h") || file.name.endsWith(".hpp")) {
                 const buffer = await file.arrayBuffer();
+                if (buffer.byteLength > MAX_FILE_BYTES) {
+                    warning = "ファイルサイズが大きすぎるため一部を読み込みませんでした。";
+                    continue;
+                }
+                if (totalBytes + buffer.byteLength > MAX_TOTAL_BYTES) {
+                    warning = "合計サイズが大きすぎるため一部を読み込みませんでした。";
+                    break;
+                }
                 const decoder = new TextDecoder("utf-8", { fatal: false });
                 const content = decoder.decode(buffer);
+                const lineCount = content.split("\n").length;
+                if (totalLines + lineCount > MAX_TOTAL_LINES) {
+                    warning = "合計行数が大きすぎるため一部を読み込みませんでした。";
+                    break;
+                }
                 const path = file.webkitRelativePath || file.name;
                 fileData.push({ name: file.name, path, content });
+                totalBytes += buffer.byteLength;
+                totalLines += lineCount;
             }
         }
 
         setFiles(fileData);
         setResults(null);
         setClassIssues(null);
+        setEvaluation(null);
+        setUploadWarning(warning);
     };
 
     const findDuplicates = () => {
@@ -86,6 +129,64 @@ function CppAnalyzer() {
         { key: "standard", label: "標準" },
         { key: "lenient", label: "緩め" },
     ];
+
+    const editors = [
+        { key: "notepad", label: "メモ帳" },
+        { key: "vscode", label: "VS Code" },
+        { key: "sakura", label: "サクラエディタ" },
+        { key: "hidemaru", label: "秀丸" },
+    ];
+
+    const resolveFilePath = (path) => {
+        if (!path) {
+            return null;
+        }
+
+        const isAbsolute = /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("\\\\");
+        if (isAbsolute) {
+            return path;
+        }
+
+        if (!sourceRoot.trim()) {
+            return null;
+        }
+
+        const root = sourceRoot.trim().replace(/[\\/]+$/, "");
+        return `${root}/${path}`;
+    };
+
+    const openFileInEditor = async (path, line) => {
+        const resolved = resolveFilePath(path);
+        if (!resolved) {
+            alert("ソースルートのパスを入力してください。");
+            return;
+        }
+
+        const params = new URLSearchParams({
+            file: resolved,
+            line: String(line || 1),
+            editor,
+        });
+
+        try {
+            const response = await fetch(`/open?${params.toString()}`);
+            if (!response.ok) {
+                const text = await response.text();
+                alert(`エディタ起動に失敗しました: ${text}`);
+            }
+        } catch (err) {
+            alert(`エディタ起動に失敗しました: ${err}`);
+        }
+    };
+
+    const getCodeSnippet = (loc) => {
+        const file = files[loc.fileIdx];
+        if (!file || !file.content) {
+            return "";
+        }
+        const lines = file.content.split("\n");
+        return lines.slice(loc.startLine - 1, loc.endLine).join("\n");
+    };
 
     const RadarChart = ({ scores }) => {
         const labels = Object.keys(scores);
@@ -203,6 +304,11 @@ function CppAnalyzer() {
                         <p className="text-purple-300 text-sm mt-2">
                             ※ フォルダを選択すると、内部のすべての.cpp/.h/.hppファイルを自動的に読み込みます
                         </p>
+                        {uploadWarning && (
+                            <div className="mt-3 text-yellow-200 text-sm">
+                                {uploadWarning}
+                            </div>
+                        )}
                     </div>
 
                     <div className="mb-4">
@@ -234,6 +340,37 @@ function CppAnalyzer() {
                             ))}
                         </select>
                     </div>
+                    <div className="mb-4">
+                        <label className="block text-purple-200 mb-2 font-semibold">
+                            起動エディタ
+                        </label>
+                        <select
+                            value={editor}
+                            onChange={(e) => setEditor(e.target.value)}
+                            className="w-full rounded-md bg-white/10 text-white border border-white/20 px-3 py-2"
+                        >
+                            {editors.map((item) => (
+                                <option key={item.key} value={item.key} className="text-slate-900">
+                                    {item.label}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                    <div className="mb-4">
+                        <label className="block text-purple-200 mb-2 font-semibold">
+                            ソースルート（実ファイルのパス）
+                        </label>
+                        <input
+                            type="text"
+                            value={sourceRoot}
+                            onChange={(e) => setSourceRoot(e.target.value)}
+                            placeholder="例: C:\\Users\\shinji\\Documents\\Projects"
+                            className="w-full rounded-md bg-white/10 text-white border border-white/20 px-3 py-2"
+                        />
+                        <p className="text-purple-300 text-xs mt-2">
+                            ※ アップロードしたファイルの相対パスに対して、このルートを結合します
+                        </p>
+                    </div>
 
                     {files.length > 0 && (
                         <div className="mb-4">
@@ -258,10 +395,21 @@ function CppAnalyzer() {
                         <span className="w-5 h-5"><Search /></span>
                         {analyzing ? "解析中..." : "コード分析を実行"}
                     </button>
+                    {memoryInfo && (
+                        <div className="mt-3 text-xs text-purple-200">
+                            JS Heap: {Math.round(memoryInfo.used / (1024 * 1024))}MB /
+                            {Math.round(memoryInfo.total / (1024 * 1024))}MB (limit {Math.round(memoryInfo.limit / (1024 * 1024))}MB)
+                        </div>
+                    )}
                 </div>
 
                 {evaluation && (
                     <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-6 border border-white/20">
+                        {evaluation.details.analysisMode === "light" && (
+                            <div className="bg-yellow-900/30 border border-yellow-500/50 text-yellow-200 rounded-lg p-4 mb-4">
+                                {evaluation.details.analysisNote}
+                            </div>
+                        )}
                         <div className="flex flex-col lg:flex-row gap-6">
                             <div className="flex-1">
                                 <div className="flex items-center gap-3 mb-3">
@@ -362,9 +510,15 @@ function CppAnalyzer() {
                                 <div className="space-y-3">
                                     {classIssues.nonVirtualDestructors.map((issue, idx) => (
                                         <div key={idx} className="bg-red-900/30 rounded-lg p-4 border border-red-500/50">
-                                            <div className="font-mono text-yellow-300 mb-2">
-                                                📄 {issue.file} (行 {issue.lineNum})
-                                            </div>
+                            <div className="font-mono text-yellow-300 mb-2">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => openFileInEditor(issue.file, issue.lineNum)}
+                                                            className="text-yellow-300 underline"
+                                                        >
+                                                            📄 {issue.file} (行 {issue.lineNum})
+                                                        </button>
+                                                    </div>
                                             <div className="text-white">
                                                 クラス: <span className="font-bold text-red-300">{issue.className}</span>
                                             </div>
@@ -389,7 +543,13 @@ function CppAnalyzer() {
                                     {classIssues.hiddenMembers.map((issue, idx) => (
                                         <div key={idx} className="bg-orange-900/30 rounded-lg p-4 border border-orange-500/50">
                                             <div className="font-mono text-yellow-300 mb-2">
-                                                📄 {issue.file} (行 {issue.lineNum})
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openFileInEditor(issue.file, issue.lineNum)}
+                                                    className="text-yellow-300 underline"
+                                                >
+                                                    📄 {issue.file} (行 {issue.lineNum})
+                                                </button>
                                             </div>
                                             <div className="text-white mb-1">
                                                 派生クラス: <span className="font-bold text-orange-300">{issue.derivedClass}</span>
@@ -423,7 +583,13 @@ function CppAnalyzer() {
                                     {classIssues.longFunctions.map((func, idx) => (
                                         <div key={idx} className="bg-yellow-900/30 rounded-lg p-4 border border-yellow-500/50">
                                             <div className="font-mono text-yellow-300 mb-2">
-                                                📄 {func.file} (行 {func.startLine}-{func.endLine})
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openFileInEditor(func.file, func.startLine)}
+                                                    className="text-yellow-300 underline"
+                                                >
+                                                    📄 {func.file} (行 {func.startLine}-{func.endLine})
+                                                </button>
                                             </div>
                                             <div className="text-white mb-1">
                                                 関数名: <span className="font-bold text-yellow-300">{func.functionName}</span>
@@ -454,7 +620,13 @@ function CppAnalyzer() {
                                     {classIssues.godClasses.map((issue, idx) => (
                                         <div key={idx} className="bg-purple-900/30 rounded-lg p-4 border border-purple-500/50">
                                             <div className="font-mono text-purple-200 mb-2">
-                                                📄 {issue.file} (行 {issue.lineNum}-{issue.endLine})
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openFileInEditor(issue.file, issue.lineNum)}
+                                                    className="text-purple-200 underline"
+                                                >
+                                                    📄 {issue.file} (行 {issue.lineNum}-{issue.endLine})
+                                                </button>
                                             </div>
                                             <div className="text-white mb-1">
                                                 クラス: <span className="font-bold text-purple-300">{issue.className}</span>
@@ -473,8 +645,14 @@ function CppAnalyzer() {
                     </div>
                 )}
 
-                {results && (
-                    <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
+                        {results && results.skipped && (
+                            <div className="bg-yellow-900/30 border border-yellow-500/50 text-yellow-200 rounded-lg p-4 mb-4">
+                                {results.reason}
+                            </div>
+                        )}
+
+                        {results && !results.skipped && (
+                            <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
                         <div className="mb-6">
                             <div className="grid grid-cols-3 gap-4">
                                 <div className="bg-purple-600/30 rounded-lg p-4 text-center">
@@ -511,18 +689,24 @@ function CppAnalyzer() {
                                         </span>
                                     </div>
 
-                                    {dup.locations.map((loc, locIdx) => (
-                                        <div key={locIdx} className="mb-3 last:mb-0">
-                                            <div className="text-yellow-300 text-sm mb-1 font-mono">
-                                                📄 {loc.filePath || loc.fileName} (行 {loc.startLine}-{loc.endLine})
+                                            {dup.locations.map((loc, locIdx) => (
+                                                <div key={locIdx} className="mb-3 last:mb-0">
+                                                    <div className="text-yellow-300 text-sm mb-1 font-mono">
+                                                        <button
+                                                            type="button"
+                                                    onClick={() => openFileInEditor(loc.filePath || loc.fileName, loc.startLine)}
+                                                    className="text-yellow-300 underline"
+                                                >
+                                                    📄 {loc.filePath || loc.fileName} (行 {loc.startLine}-{loc.endLine})
+                                                </button>
                                             </div>
-                                            {locIdx === 0 && (
-                                                <pre className="bg-slate-900/50 p-3 rounded overflow-x-auto text-xs text-green-300 font-mono max-h-40 overflow-y-auto">
-                                                    {loc.code}
-                                                </pre>
-                                            )}
-                                        </div>
-                                    ))}
+                                                    {locIdx === 0 && (
+                                                        <pre className="bg-slate-900/50 p-3 rounded overflow-x-auto text-xs text-green-300 font-mono max-h-40 overflow-y-auto">
+                                                            {getCodeSnippet(loc)}
+                                                        </pre>
+                                                    )}
+                                                </div>
+                                            ))}
                                 </div>
                             ))}
                         </div>
