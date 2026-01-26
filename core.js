@@ -588,14 +588,16 @@ class DuplicateFinder {
         });
 
         const deduped = DuplicateFinder.collapseNearDuplicates(duplicates, 0.8);
+        const pruned = DuplicateFinder.removeContainedDuplicates(deduped);
+        const merged = DuplicateFinder.collapseOverlappingRuns(pruned);
 
-        const totalDuplicateLines = deduped.reduce((sum, dup) => {
+        const totalDuplicateLines = merged.reduce((sum, dup) => {
             return sum + (dup.locations.length - 1) * dup.locations[0].length;
         }, 0);
 
         return {
-            duplicates: deduped.slice(0, 50),
-            totalDuplicates: deduped.length,
+            duplicates: merged.slice(0, 50),
+            totalDuplicates: merged.length,
             totalDuplicateLines,
         };
     }
@@ -659,6 +661,97 @@ class DuplicateFinder {
             return 0;
         }
         return overlap / minLength;
+    }
+
+    static removeContainedDuplicates(duplicates) {
+        const sorted = [...duplicates].sort((a, b) => {
+            const maxLengthA = Math.max(...a.locations.map((l) => l.length));
+            const maxLengthB = Math.max(...b.locations.map((l) => l.length));
+            return maxLengthB - maxLengthA;
+        });
+
+        const kept = [];
+        sorted.forEach((candidate) => {
+            const isContained = kept.some((existing) =>
+                DuplicateFinder.isContainedIn(candidate, existing)
+            );
+            if (!isContained) {
+                kept.push(candidate);
+            }
+        });
+
+        return kept;
+    }
+
+    static collapseOverlappingRuns(duplicates) {
+        const sorted = [...duplicates].sort((a, b) => {
+            const locA = a.locations[0];
+            const locB = b.locations[0];
+            if (!locA || !locB) {
+                return 0;
+            }
+            const fileA = DuplicateFinder.locationKey(locA);
+            const fileB = DuplicateFinder.locationKey(locB);
+            if (fileA !== fileB) {
+                return fileA.localeCompare(fileB);
+            }
+            return locA.startLine - locB.startLine;
+        });
+
+        const rangesByKey = new Map();
+        const kept = [];
+
+        sorted.forEach((candidate) => {
+            if (candidate.locations.length !== 2) {
+                kept.push(candidate);
+                return;
+            }
+
+            const locA = candidate.locations[0];
+            const locB = candidate.locations[1];
+            const fileA = DuplicateFinder.locationKey(locA);
+            const fileB = DuplicateFinder.locationKey(locB);
+            const key = `${fileA}::${fileB}::${locB.startLine - locA.startLine}`;
+
+            if (!rangesByKey.has(key)) {
+                rangesByKey.set(key, []);
+            }
+
+            const ranges = rangesByKey.get(key);
+            const last = ranges[ranges.length - 1];
+            if (last && locA.startLine <= last.endLine) {
+                if (locA.endLine > last.endLine) {
+                    last.endLine = locA.endLine;
+                }
+                return;
+            }
+
+            ranges.push({ startLine: locA.startLine, endLine: locA.endLine });
+            kept.push(candidate);
+        });
+
+        return kept;
+    }
+
+    static isContainedIn(smaller, larger) {
+        if (smaller.locations.length !== larger.locations.length) {
+            return false;
+        }
+
+        const smallSorted = DuplicateFinder.sortLocations(smaller.locations);
+        const largeSorted = DuplicateFinder.sortLocations(larger.locations);
+
+        return smallSorted.every((locA, index) => {
+            const locB = largeSorted[index];
+            if (!locB) {
+                return false;
+            }
+            if (DuplicateFinder.locationKey(locA) !== DuplicateFinder.locationKey(locB)) {
+                return false;
+            }
+            const contained = locA.startLine >= locB.startLine && locA.endLine <= locB.endLine;
+            return contained;
+        });
     }
 }
 
@@ -995,7 +1088,7 @@ class CandidateEvaluator {
 class CppAnalyzerCore {
     static evaluateCandidate(files, minLines, profileKey) {
         const stats = CppAnalyzerCore.getStats(files);
-        const useLightMode = stats.totalLines > 1200 || stats.totalBytes > 300000;
+        const useLightMode = stats.totalLines > 120000 || stats.totalBytes > 3000000;
 
         const duplicates = CppAnalyzerCore.findDuplicates(files, minLines);
         const classIssues = useLightMode
@@ -1052,7 +1145,7 @@ class CppAnalyzerCore {
 
     static findDuplicates(files, minLines) {
         const totalLines = files.reduce((sum, file) => sum + file.content.split("\n").length, 0);
-        if (totalLines > 12000) {
+        if (totalLines > 120000) {
             return {
                 duplicates: [],
                 totalDuplicates: 0,

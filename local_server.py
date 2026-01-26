@@ -16,8 +16,6 @@ EDITOR_COMMANDS = {
 
 def safe_path(path):
     normalized = os.path.abspath(os.path.normpath(path))
-    if not normalized.startswith(ROOT):
-        return None
     return normalized
 
 
