@@ -33,18 +33,27 @@ class LongFunctionAnalyzer {
                 const functionStartIndex = match.functionStartIndex;
                 const functionStartLine = content.substring(0, functionStartIndex).split("\n").length;
 
-                let braceCount = 1;
+                let braceCount = 0;
                 let functionEndLine = functionStartLine;
+                let inBlockComment = false;
+                let started = false;
 
                 for (let i = functionStartLine - 1; i < lines.length; i++) {
                     const line = lines[i];
+                    const sanitizeResult = FunctionMetricsAnalyzer.stripCommentsAndStrings(line, inBlockComment);
+                    const sanitizedLine = sanitizeResult.line;
+                    inBlockComment = sanitizeResult.inBlockComment;
 
-                    for (const char of line) {
-                        if (char === "{") braceCount++;
-                        else if (char === "}") braceCount--;
+                    for (const char of sanitizedLine) {
+                        if (char === "{") {
+                            braceCount++;
+                            started = true;
+                        } else if (char === "}") {
+                            braceCount--;
+                        }
                     }
 
-                    if (braceCount === 0) {
+                    if (started && braceCount === 0) {
                         functionEndLine = i + 1;
                         break;
                     }
@@ -54,9 +63,14 @@ class LongFunctionAnalyzer {
 
                 if (functionLength > functionLineThreshold) {
                     let actualCodeLines = 0;
+                    inBlockComment = false;
                     for (let i = functionStartLine - 1; i < functionEndLine; i++) {
-                        const line = lines[i].trim();
-                        if (line && !line.startsWith("//") && !line.startsWith("/*") && !line.startsWith("*")) {
+                        const line = lines[i];
+                        const sanitizeResult = FunctionMetricsAnalyzer.stripCommentsAndStrings(line, inBlockComment);
+                        const sanitizedLine = sanitizeResult.line;
+                        inBlockComment = sanitizeResult.inBlockComment;
+                        const trimmed = sanitizedLine.trim();
+                        if (trimmed.length > 0) {
                             actualCodeLines++;
                         }
                     }
@@ -93,12 +107,13 @@ class FunctionMetricsAnalyzer {
                 const functionStartLine = content.substring(0, functionStartIndex).split("\n").length;
                 const signatureInfo = FunctionMetricsAnalyzer.extractSignature(content, functionStartIndex);
 
-                let braceCount = 1;
+                let braceCount = 0;
                 let functionEndLine = functionStartLine;
                 let currentNesting = 0;
                 let maxNesting = 0;
                 let complexity = 1;
                 let inBlockComment = false;
+                let started = false;
 
                 for (let i = functionStartLine - 1; i < lines.length; i++) {
                     const line = lines[i];
@@ -111,6 +126,7 @@ class FunctionMetricsAnalyzer {
                     for (const char of sanitizedLine) {
                         if (char === "{") {
                             braceCount++;
+                            started = true;
                             currentNesting = Math.max(0, braceCount - 1);
                             maxNesting = Math.max(maxNesting, currentNesting);
                         } else if (char === "}") {
@@ -119,7 +135,7 @@ class FunctionMetricsAnalyzer {
                         }
                     }
 
-                    if (braceCount === 0) {
+                    if (started && braceCount === 0) {
                         functionEndLine = i + 1;
                         break;
                     }
