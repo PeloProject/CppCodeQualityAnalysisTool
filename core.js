@@ -26,19 +26,17 @@ class LongFunctionAnalyzer {
         files.forEach((file) => {
             const content = file.content;
             const lines = content.split("\n");
+            const matches = FunctionMetricsAnalyzer.findFunctionHeaders(content);
 
-            const functionRegex = /^[\s]*(?:(?:inline|static|virtual|explicit|friend|constexpr)\s+)*(?:[\w:]+(?:<[^>]*>)?(?:\s*[&*])*)\s+([\w:]+)\s*\([^)]*\)(?:\s*const)?(?:\s*noexcept)?(?:\s*override)?(?:\s*final)?[\s]*(?:->[\w\s:<>*&]+)?[\s]*\{/gm;
-
-            let match;
-            while ((match = functionRegex.exec(content)) !== null) {
-                const functionName = match[1];
-                const functionStartIndex = match.index;
+            matches.forEach((match) => {
+                const functionName = match.functionName;
+                const functionStartIndex = match.functionStartIndex;
                 const functionStartLine = content.substring(0, functionStartIndex).split("\n").length;
 
                 let braceCount = 1;
                 let functionEndLine = functionStartLine;
 
-                for (let i = functionStartLine; i < lines.length; i++) {
+                for (let i = functionStartLine - 1; i < lines.length; i++) {
                     const line = lines[i];
 
                     for (const char of line) {
@@ -72,7 +70,7 @@ class LongFunctionAnalyzer {
                         codeLines: actualCodeLines,
                     });
                 }
-            }
+            });
         });
 
         longFunctions.sort((a, b) => b.codeLines - a.codeLines);
@@ -87,13 +85,11 @@ class FunctionMetricsAnalyzer {
         files.forEach((file) => {
             const content = file.content;
             const lines = content.split("\n");
+            const matches = FunctionMetricsAnalyzer.findFunctionHeaders(content);
 
-            const functionRegex = /^[\s]*(?:(?:inline|static|virtual|explicit|friend|constexpr)\s+)*(?:[\w:]+(?:<[^>]*>)?(?:\s*[&*])*)\s+([\w:]+)\s*\([^)]*\)(?:\s*const)?(?:\s*noexcept)?(?:\s*override)?(?:\s*final)?[\s]*(?:->[\w\s:<>*&]+)?[\s]*\{/gm;
-
-            let match;
-            while ((match = functionRegex.exec(content)) !== null) {
-                const functionName = match[1];
-                const functionStartIndex = match.index;
+            matches.forEach((match) => {
+                const functionName = match.functionName;
+                const functionStartIndex = match.functionStartIndex;
                 const functionStartLine = content.substring(0, functionStartIndex).split("\n").length;
                 const signatureInfo = FunctionMetricsAnalyzer.extractSignature(content, functionStartIndex);
 
@@ -104,7 +100,7 @@ class FunctionMetricsAnalyzer {
                 let complexity = 1;
                 let inBlockComment = false;
 
-                for (let i = functionStartLine; i < lines.length; i++) {
+                for (let i = functionStartLine - 1; i < lines.length; i++) {
                     const line = lines[i];
                     const sanitizeResult = FunctionMetricsAnalyzer.stripCommentsAndStrings(line, inBlockComment);
                     const sanitizedLine = sanitizeResult.line;
@@ -141,7 +137,7 @@ class FunctionMetricsAnalyzer {
                     maxNesting,
                     parameterCount: signatureInfo.parameterCount,
                 });
-            }
+            });
         });
 
         const totalFunctions = functions.length;
@@ -167,7 +163,7 @@ class FunctionMetricsAnalyzer {
     static extractSignature(content, startIndex) {
         const startParen = content.indexOf("(", startIndex);
         if (startParen === -1) {
-            return { parameterCount: 0 };
+            return { parameterCount: 0, endParen: -1 };
         }
 
         let depth = 0;
@@ -185,12 +181,45 @@ class FunctionMetricsAnalyzer {
         }
 
         if (endParen === -1) {
-            return { parameterCount: 0 };
+            return { parameterCount: 0, endParen: -1 };
         }
 
         const params = content.slice(startParen + 1, endParen);
         const parameterCount = FunctionMetricsAnalyzer.countParameters(params);
-        return { parameterCount };
+        return { parameterCount, endParen };
+    }
+
+    static hasFunctionBodyAfter(content, endParen) {
+        if (endParen < 0) {
+            return false;
+        }
+
+        const tail = content.slice(endParen + 1);
+        const match = tail.match(/^\s*(?:\s*(?:const|noexcept|override|final))*\s*(?:->[\w\s:<>*&]+)?\s*\{/);
+        return Boolean(match);
+    }
+
+    static findFunctionHeaders(content) {
+        const functionRegex = /^[\s]*(?:(?:inline|static|virtual|explicit|friend|constexpr)\s+)*(?:[\w:]+(?:<[^>]*>)?(?:\s*[&*])*)\s+([\w:]+)\s*\(/gm;
+        const matches = [];
+        let match;
+
+        while ((match = functionRegex.exec(content)) !== null) {
+            const functionName = match[1];
+            const functionStartIndex = match.index;
+            const signatureInfo = FunctionMetricsAnalyzer.extractSignature(content, functionStartIndex);
+
+            if (!FunctionMetricsAnalyzer.hasFunctionBodyAfter(content, signatureInfo.endParen)) {
+                continue;
+            }
+
+            matches.push({
+                functionName,
+                functionStartIndex,
+            });
+        }
+
+        return matches;
     }
 
     static countParameters(params) {
