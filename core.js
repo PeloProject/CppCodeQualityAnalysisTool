@@ -410,19 +410,37 @@ class ClassAnalyzer {
             }
         });
 
+        const derivedByBase = new Map();
         classMap.forEach((classInfo, className) => {
-            if (classInfo.baseClasses.length > 0 && !classInfo.members.hasVirtualDestructor) {
-                const hasDestructor = classInfo.content.includes(`~${className}`);
-                if (hasDestructor || classInfo.content.includes("virtual")) {
-                    issues.nonVirtualDestructors.push({
-                        className,
-                        file: classInfo.file,
-                        lineNum: classInfo.lineNum,
-                        baseClasses: classInfo.baseClasses,
-                    });
+            classInfo.baseClasses.forEach((baseName) => {
+                if (!derivedByBase.has(baseName)) {
+                    derivedByBase.set(baseName, []);
                 }
-            }
+                derivedByBase.get(baseName).push(className);
+            });
+        });
 
+        derivedByBase.forEach((derivedClasses, baseName) => {
+            const baseClass = classMap.get(baseName);
+            if (!baseClass) {
+                return;
+            }
+            if (baseClass.members.hasVirtualDestructor) {
+                return;
+            }
+            const hasDestructor = baseClass.content.includes(`~${baseName}`);
+            const hasVirtualMembers = /\bvirtual\b/.test(baseClass.content);
+            if (hasDestructor || hasVirtualMembers) {
+                issues.nonVirtualDestructors.push({
+                    className: baseName,
+                    file: baseClass.file,
+                    lineNum: baseClass.lineNum,
+                    baseClasses: derivedClasses,
+                });
+            }
+        });
+
+        classMap.forEach((classInfo, className) => {
             classInfo.baseClasses.forEach((baseName) => {
                 const baseClass = classMap.get(baseName);
                 if (baseClass) {
