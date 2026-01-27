@@ -311,6 +311,45 @@ class FunctionMetricsAnalyzer {
 }
 
 class ClassAnalyzer {
+    static stripNestedTypes(content) {
+        const typeRegex = /(class|struct)\s+\w+[^{;]*\{/g;
+        let result = "";
+        let lastIndex = 0;
+        let match;
+
+        while ((match = typeRegex.exec(content)) !== null) {
+            const startIndex = match.index;
+            const braceStart = content.indexOf("{", startIndex);
+            if (braceStart === -1) {
+                continue;
+            }
+
+            result += content.slice(lastIndex, startIndex);
+
+            let braceCount = 0;
+            let endIndex = braceStart;
+            for (; endIndex < content.length; endIndex++) {
+                const char = content[endIndex];
+                if (char === "{") {
+                    braceCount++;
+                } else if (char === "}") {
+                    braceCount--;
+                }
+
+                if (braceCount === 0) {
+                    endIndex++;
+                    break;
+                }
+            }
+
+            lastIndex = endIndex;
+            typeRegex.lastIndex = endIndex;
+        }
+
+        result += content.slice(lastIndex);
+        return result;
+    }
+
     static analyze(files) {
         const issues = {
             nonVirtualDestructors: [],
@@ -325,7 +364,7 @@ class ClassAnalyzer {
             const content = file.content;
             const lines = content.split("\n");
 
-            const classRegex = /class\s+(\w+)(?:\s*:\s*(?:public|protected|private)?\s*(\w+(?:\s*,\s*(?:public|protected|private)?\s*\w+)*))?/g;
+            const classRegex = /(?:class|struct)\s+(\w+)(?:\s*:\s*(?:public|protected|private)?\s*(\w+(?:\s*,\s*(?:public|protected|private)?\s*\w+)*))?/g;
             let match;
 
             while ((match = classRegex.exec(content)) !== null) {
@@ -357,6 +396,7 @@ class ClassAnalyzer {
                     }
                 }
 
+                const contentWithoutNested = ClassAnalyzer.stripNestedTypes(classContent);
                 const baseClasses = [];
                 if (inheritance) {
                     const bases = inheritance.split(",");
@@ -373,14 +413,14 @@ class ClassAnalyzer {
                 };
 
                 const destructorRegex = new RegExp(`(virtual\\s+)?~${className}\\s*\\(`);
-                const destructorMatch = classContent.match(destructorRegex);
+                const destructorMatch = contentWithoutNested.match(destructorRegex);
                 if (destructorMatch) {
                     members.hasVirtualDestructor = destructorMatch[1] !== undefined;
                 }
 
                 const functionRegex = /(?:virtual\s+)?(?:static\s+)?(?:\w+(?:<[^>]+>)?(?:\s*\*|\s*&)?)\s+(\w+)\s*\([^)]*\)(?:\s*const)?(?:\s*override)?(?:\s*final)?/g;
                 let funcMatch;
-                while ((funcMatch = functionRegex.exec(classContent)) !== null) {
+                while ((funcMatch = functionRegex.exec(contentWithoutNested)) !== null) {
                     const funcName = funcMatch[1];
                     if (funcName !== className && !funcName.startsWith("~")) {
                         members.functions.push({
@@ -392,7 +432,7 @@ class ClassAnalyzer {
 
                 const varRegex = /(?:(?:static|const|mutable)\s+)*(?:\w+(?:<[^>]+>)?(?:\s*\*|\s*&)?)\s+(\w+)\s*(?:=|;|\[)/g;
                 let varMatch;
-                while ((varMatch = varRegex.exec(classContent)) !== null) {
+                while ((varMatch = varRegex.exec(contentWithoutNested)) !== null) {
                     const varName = varMatch[1];
                     if (!["public", "private", "protected", "class", "struct", "if", "for", "while", "return"].includes(varName)) {
                         members.variables.push(varName);
@@ -406,6 +446,7 @@ class ClassAnalyzer {
                     baseClasses,
                     members,
                     content: classContent,
+                    contentWithoutNested,
                 });
             }
         });
@@ -428,8 +469,8 @@ class ClassAnalyzer {
             if (baseClass.members.hasVirtualDestructor) {
                 return;
             }
-            const hasDestructor = baseClass.content.includes(`~${baseName}`);
-            const hasVirtualMembers = /\bvirtual\b/.test(baseClass.content);
+            const hasDestructor = baseClass.contentWithoutNested.includes(`~${baseName}`);
+            const hasVirtualMembers = /\bvirtual\b/.test(baseClass.contentWithoutNested);
             if (hasDestructor || hasVirtualMembers) {
                 issues.nonVirtualDestructors.push({
                     className: baseName,
