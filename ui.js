@@ -523,7 +523,7 @@ function CppAnalyzer() {
                                                 クラス: <span className="font-bold text-red-300">{issue.className}</span>
                                             </div>
                                             <div className="text-gray-300 text-sm">
-                                                継承元: {issue.baseClasses.join(", ")}
+                                                派生クラス: {issue.baseClasses.join(", ")}
                                             </div>
                                             <div className="mt-2 text-orange-200 text-sm">
                                                 💡 派生クラスをポリモーフィックに使用する場合、基底クラスのデストラクタは virtual にすべきです
