@@ -889,7 +889,10 @@ class CandidateEvaluator {
         const profile = profiles[profileKey] || profiles.standard;
 
         const totalLines = files.reduce((sum, file) => sum + file.content.split("\n").length, 0);
-        const duplicateRatio = totalLines === 0 ? 0 : analysis.duplicates.totalDuplicateLines / totalLines;
+        const duplicateLinesTotal = analysis.duplicates.scopedTotalLines ?? totalLines;
+        const duplicateRatio = duplicateLinesTotal === 0
+            ? 0
+            : analysis.duplicates.totalDuplicateLines / duplicateLinesTotal;
         const functionMetrics = analysis.functionMetrics;
         const classIssues = analysis.classIssues;
         const safety = analysis.safety;
@@ -1174,6 +1177,11 @@ class CandidateEvaluator {
 }
 
 class CppAnalyzerCore {
+    static isHeaderFile(file) {
+        const path = (file.path || file.name || "").toLowerCase();
+        return /\.(h|hh|hpp|hxx|inl)$/.test(path);
+    }
+
     static evaluateCandidate(files, minLines, profileKey) {
         const stats = CppAnalyzerCore.getStats(files);
         const useLightMode = stats.totalLines > 120000 || stats.totalBytes > 3000000;
@@ -1232,7 +1240,8 @@ class CppAnalyzerCore {
     }
 
     static findDuplicates(files, minLines) {
-        const totalLines = files.reduce((sum, file) => sum + file.content.split("\n").length, 0);
+        const sourceFiles = files.filter((file) => !CppAnalyzerCore.isHeaderFile(file));
+        const totalLines = sourceFiles.reduce((sum, file) => sum + file.content.split("\n").length, 0);
         if (totalLines > 120000) {
             return {
                 duplicates: [],
@@ -1240,9 +1249,22 @@ class CppAnalyzerCore {
                 totalDuplicateLines: 0,
                 skipped: true,
                 reason: "データ量が多いため重複検出をスキップしました。",
+                scopedTotalLines: totalLines,
             };
         }
-        return DuplicateFinder.find(files, minLines);
+        if (sourceFiles.length === 0) {
+            return {
+                duplicates: [],
+                totalDuplicates: 0,
+                totalDuplicateLines: 0,
+                scopedTotalLines: 0,
+            };
+        }
+        const result = DuplicateFinder.find(sourceFiles, minLines);
+        return {
+            ...result,
+            scopedTotalLines: totalLines,
+        };
     }
 
     static getStats(files) {
