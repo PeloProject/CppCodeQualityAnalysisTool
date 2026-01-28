@@ -180,7 +180,10 @@ function CppAnalyzer() {
     };
 
     const getCodeSnippet = (loc) => {
-        const file = files[loc.fileIdx];
+        const targetPath = loc.filePath || loc.fileName;
+        const file = targetPath
+            ? files.find((candidate) => (candidate.path || candidate.name) === targetPath)
+            : files[loc.fileIdx];
         if (!file || !file.content) {
             return "";
         }
