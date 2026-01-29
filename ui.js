@@ -73,9 +73,10 @@ function CppAnalyzer() {
     const handleFileUpload = async (e) => {
         const uploadedFiles = Array.from(e.target.files);
         const fileData = [];
-        const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
-        const MAX_TOTAL_LINES = 10000;
-        const MAX_FILE_BYTES = 5 * 1024 * 1024;
+        const limits = (window.CPP_ANALYZER_CONFIG && window.CPP_ANALYZER_CONFIG.uploadLimits) || {};
+        const MAX_TOTAL_BYTES = limits.maxTotalBytes ?? 10 * 1024 * 1024;
+        const MAX_TOTAL_LINES = limits.maxTotalLines ?? 10000;
+        const MAX_FILE_BYTES = limits.maxFileBytes ?? 5 * 1024 * 1024;
         let totalBytes = 0;
         let totalLines = 0;
         let warning = "";
