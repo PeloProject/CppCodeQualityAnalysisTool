@@ -46,6 +46,8 @@ function CppAnalyzer() {
     const [minLines, setMinLines] = useState(5);
     const [results, setResults] = useState(null);
     const [classIssues, setClassIssues] = useState(null);
+    const [errorHandling, setErrorHandling] = useState(null);
+    const [paramPassing, setParamPassing] = useState(null);
     const [evaluation, setEvaluation] = useState(null);
     const [analyzing, setAnalyzing] = useState(false);
     const [profile, setProfile] = useState("standard");
@@ -109,6 +111,8 @@ function CppAnalyzer() {
         setFiles(fileData);
         setResults(null);
         setClassIssues(null);
+        setErrorHandling(null);
+        setParamPassing(null);
         setEvaluation(null);
         setUploadWarning(warning);
     };
@@ -120,6 +124,8 @@ function CppAnalyzer() {
 
             setResults(analysis.duplicates);
             setClassIssues(analysis.classIssues);
+            setErrorHandling(analysis.errorHandling);
+            setParamPassing(analysis.paramPassing);
             setEvaluation(analysis.evaluation);
             setAnalyzing(false);
         }, 100);
@@ -262,7 +268,7 @@ function CppAnalyzer() {
                         <div className="w-10 h-10 text-purple-400"><Copy /></div>
                         <h1 className="text-4xl font-bold text-white">C++ コード品質分析ツール</h1>
                     </div>
-                    <p className="text-purple-200">重複コード検出 + クラス設計問題の検出</p>
+                    <p className="text-purple-200">類似コード検出 + クラス設計問題の検出</p>
                 </div>
 
                 <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-6 border border-white/20">
@@ -452,7 +458,7 @@ function CppAnalyzer() {
                                         <div className="text-white font-bold">{evaluation.details.maxNesting}</div>
                                     </div>
                                     <div className="bg-black/30 rounded-lg p-3">
-                                        <div className="text-purple-200">重複率</div>
+                                        <div className="text-purple-200">類似率</div>
                                         <div className="text-white font-bold">{evaluation.details.duplicateRatio}%</div>
                                     </div>
                                     <div className="bg-black/30 rounded-lg p-3">
@@ -462,6 +468,14 @@ function CppAnalyzer() {
                                     <div className="bg-black/30 rounded-lg p-3">
                                         <div className="text-purple-200">安全性指摘</div>
                                         <div className="text-white font-bold">{evaluation.details.safetyFindings}</div>
+                                    </div>
+                                    <div className="bg-black/30 rounded-lg p-3">
+                                        <div className="text-purple-200">空catch</div>
+                                        <div className="text-white font-bold">{evaluation.details.emptyCatch}</div>
+                                    </div>
+                                    <div className="bg-black/30 rounded-lg p-3">
+                                        <div className="text-purple-200">値渡しクラス引数</div>
+                                        <div className="text-white font-bold">{evaluation.details.nonRefClassParams}</div>
                                     </div>
                                 </div>
                             </div>
@@ -649,11 +663,77 @@ function CppAnalyzer() {
                     </div>
                 )}
 
-                        {results && results.skipped && (
-                            <div className="bg-yellow-900/30 border border-yellow-500/50 text-yellow-200 rounded-lg p-4 mb-4">
-                                {results.reason}
-                            </div>
-                        )}
+                {errorHandling && errorHandling.findings.length > 0 && (
+                    <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-6 border border-yellow-500/30">
+                        <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-2">
+                            <span className="w-6 h-6 text-yellow-400"><AlertTriangle /></span>
+                            エラーハンドリングの問題
+                        </h2>
+                        <div className="space-y-3 max-h-80 overflow-y-auto">
+                            {errorHandling.findings.map((issue, idx) => (
+                                <div key={idx} className="bg-yellow-900/30 rounded-lg p-4 border border-yellow-500/50">
+                                    <div className="font-mono text-yellow-300 mb-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => openFileInEditor(issue.file, issue.lineNum)}
+                                            className="text-yellow-300 underline"
+                                        >
+                                            📄 {issue.file} (行 {issue.lineNum})
+                                        </button>
+                                    </div>
+                                    <div className="text-white">
+                                        指摘: <span className="font-bold text-yellow-300">{issue.label}</span>
+                                    </div>
+                                    <div className="mt-2 text-yellow-200 text-sm">
+                                        💡 空のcatchは障害の見逃しにつながるため、ログ出力や再throwを検討してください
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {paramPassing && paramPassing.findings.length > 0 && (
+                    <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-6 border border-blue-500/30">
+                        <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-2">
+                            <span className="w-6 h-6 text-blue-400"><AlertCircle /></span>
+                            引数渡しの問題
+                        </h2>
+                        <div className="space-y-3 max-h-80 overflow-y-auto">
+                            {paramPassing.findings.map((issue, idx) => (
+                                <div key={idx} className="bg-blue-900/30 rounded-lg p-4 border border-blue-500/50">
+                                    <div className="font-mono text-blue-300 mb-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => openFileInEditor(issue.file, issue.lineNum)}
+                                            className="text-blue-300 underline"
+                                        >
+                                            📄 {issue.file} (行 {issue.lineNum})
+                                        </button>
+                                    </div>
+                                    <div className="text-white">
+                                        関数: <span className="font-bold text-blue-300">{issue.functionName}</span>
+                                    </div>
+                                    <div className="text-white text-sm">
+                                        引数: <span className="font-bold text-blue-200">{issue.paramName || "（名称なし）"}</span>
+                                    </div>
+                                    <div className="text-gray-300 text-sm">
+                                        型: <span className="font-bold text-blue-200">{issue.typeName}</span>
+                                    </div>
+                                    <div className="mt-2 text-blue-200 text-sm">
+                                        💡 大きな型は `const &` で渡すとコピーを避けられます
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {results && results.skipped && (
+                    <div className="bg-yellow-900/30 border border-yellow-500/50 text-yellow-200 rounded-lg p-4 mb-4">
+                        {results.reason}
+                    </div>
+                )}
 
                         {results && !results.skipped && (
                             <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
@@ -661,11 +741,11 @@ function CppAnalyzer() {
                             <div className="grid grid-cols-3 gap-4">
                                 <div className="bg-purple-600/30 rounded-lg p-4 text-center">
                                     <div className="text-3xl font-bold text-white">{results.totalDuplicates}</div>
-                                    <div className="text-purple-200 text-sm">重複パターン</div>
+                                    <div className="text-purple-200 text-sm">類似パターン</div>
                                 </div>
                                 <div className="bg-red-600/30 rounded-lg p-4 text-center">
                                     <div className="text-3xl font-bold text-white">{results.totalDuplicateLines}</div>
-                                    <div className="text-purple-200 text-sm">重複行数</div>
+                                    <div className="text-purple-200 text-sm">類似行数(推定)</div>
                                 </div>
                                 <div className="bg-yellow-600/30 rounded-lg p-4 text-center">
                                     <div className="text-3xl font-bold text-white">
@@ -678,7 +758,7 @@ function CppAnalyzer() {
 
                         <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-2">
                             <span className="w-6 h-6 text-yellow-400"><AlertCircle /></span>
-                            検出された重複コード (上位50件)
+                            検出された類似コード (上位50件)
                         </h2>
 
                         <div className="space-y-4 max-h-[600px] overflow-y-auto">
@@ -686,11 +766,18 @@ function CppAnalyzer() {
                                 <div key={idx} className="bg-black/30 rounded-lg p-4 border border-purple-500/30">
                                     <div className="flex justify-between items-start mb-3">
                                         <span className="text-purple-300 font-semibold">
-                                            重複 #{idx + 1} ({dup.locations[0].length}行)
+                                            類似 #{idx + 1} ({dup.locations[0].length}行)
                                         </span>
-                                        <span className="bg-red-500/80 text-white px-3 py-1 rounded-full text-sm">
-                                            {dup.locations.length}箇所
-                                        </span>
+                                        <div className="flex items-center gap-2">
+                                            <span className="bg-red-500/80 text-white px-3 py-1 rounded-full text-sm">
+                                                {dup.locations.length}箇所
+                                            </span>
+                                            {typeof dup.similarity === "number" && (
+                                                <span className="bg-blue-500/80 text-white px-3 py-1 rounded-full text-sm">
+                                                    類似度 {Math.round(dup.similarity * 100)}%
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
 
                                             {dup.locations.map((loc, locIdx) => (

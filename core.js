@@ -547,242 +547,318 @@ class GodClassAnalyzer {
     }
 }
 
-class DuplicateFinder {
+class SimilarityFinder {
     static find(files, minLines) {
-        const duplicates = [];
-        const duplicateMap = new Map();
-        const maxSegmentsPerFile = 5000;
-        const maxSegmentsTotal = 15000;
-        let totalSegments = 0;
+        const settings = {
+            kgram: 5,
+            window: 4,
+            similarityThreshold: 0.75,
+            minFingerprints: 8,
+            maxBucketSize: 50,
+            maxFunctions: 1500,
+        };
 
-        files.forEach((file, fileIdx) => {
-            const lines = CodeNormalizer.getCodeLines(file.content);
-            let segmentCount = 0;
+        const functions = SimilarityFinder.extractFunctions(files, minLines, settings.maxFunctions);
+        if (functions.skipped) {
+            return {
+                duplicates: [],
+                totalDuplicates: 0,
+                totalDuplicateLines: 0,
+                skipped: true,
+                reason: functions.reason,
+            };
+        }
 
-            for (let i = 0; i < lines.length; i++) {
-                if (segmentCount >= maxSegmentsPerFile || totalSegments >= maxSegmentsTotal) {
-                    break;
-                }
-                if (i + minLines > lines.length) {
-                    break;
-                }
-
-                const segment = lines
-                    .slice(i, i + minLines)
-                    .map((l) => l.normalized)
-                    .join("\n");
-
-                if (segment.length < 20) continue;
-
-                if (!duplicateMap.has(segment)) {
-                    duplicateMap.set(segment, []);
-                }
-
-                duplicateMap.get(segment).push({
-                    fileIdx,
-                    fileName: file.name,
-                    filePath: file.path,
-                    startLine: lines[i].lineNum,
-                    endLine: lines[i + minLines - 1].lineNum,
-                    length: minLines,
-                });
-                segmentCount += 1;
-                totalSegments += 1;
-            }
+        functions.items.forEach((fn) => {
+            const tokens = SimilarityFinder.tokenize(fn.content);
+            const fingerprints = SimilarityFinder.winnow(tokens, settings.kgram, settings.window);
+            fn.fingerprints = fingerprints.set;
+            fn.fingerprintCount = fingerprints.count;
         });
 
-        duplicateMap.forEach((locations) => {
-            if (locations.length > 1) {
-                const uniqueLocations = [];
-                const seen = new Set();
-
-                locations.forEach((loc) => {
-                    const key = `${loc.fileName}-${loc.startLine}`;
-                    if (!seen.has(key)) {
-                        seen.add(key);
-                        uniqueLocations.push(loc);
-                    }
-                });
-
-                if (uniqueLocations.length > 1) {
-                    duplicates.push({
-                        locations: uniqueLocations,
-                    });
-                }
-            }
+        const pairs = SimilarityFinder.computeSimilarPairs(functions.items, settings);
+        const results = pairs.map((pair) => {
+            const left = functions.items[pair.left];
+            const right = functions.items[pair.right];
+            return {
+                similarity: pair.similarity,
+                locations: [
+                    {
+                        fileName: left.file,
+                        filePath: left.file,
+                        startLine: left.startLine,
+                        endLine: left.endLine,
+                        functionName: left.name,
+                        length: left.totalLines,
+                    },
+                    {
+                        fileName: right.file,
+                        filePath: right.file,
+                        startLine: right.startLine,
+                        endLine: right.endLine,
+                        functionName: right.name,
+                        length: right.totalLines,
+                    },
+                ],
+            };
         });
 
-        duplicates.sort((a, b) => {
-            const maxLengthA = Math.max(...a.locations.map((l) => l.length));
-            const maxLengthB = Math.max(...b.locations.map((l) => l.length));
-            return maxLengthB - maxLengthA;
-        });
-
-        const deduped = DuplicateFinder.collapseNearDuplicates(duplicates, 0.8);
-        const pruned = DuplicateFinder.removeContainedDuplicates(deduped);
-        const merged = DuplicateFinder.collapseOverlappingRuns(pruned);
-
-        const totalDuplicateLines = merged.reduce((sum, dup) => {
-            return sum + (dup.locations.length - 1) * dup.locations[0].length;
+        const totalDuplicateLines = results.reduce((sum, item) => {
+            const lenA = item.locations[0]?.length || 0;
+            const lenB = item.locations[1]?.length || 0;
+            return sum + Math.min(lenA, lenB);
         }, 0);
 
         return {
-            duplicates: merged.slice(0, 50),
-            totalDuplicates: merged.length,
+            duplicates: results.slice(0, 50),
+            totalDuplicates: results.length,
             totalDuplicateLines,
         };
     }
 
-    static collapseNearDuplicates(duplicates, overlapThreshold) {
-        const deduped = [];
+    static extractFunctions(files, minLines, maxFunctions) {
+        const items = [];
+        let total = 0;
 
-        duplicates.forEach((candidate) => {
-            const isDuplicate = deduped.some((existing) =>
-                DuplicateFinder.isNearDuplicate(candidate, existing, overlapThreshold)
-            );
-            if (!isDuplicate) {
-                deduped.push(candidate);
-            }
-        });
+        for (const file of files) {
+            const content = file.content;
+            const lines = content.split("\n");
+            const matches = FunctionMetricsAnalyzer.findFunctionHeaders(content);
 
-        return deduped;
-    }
+            for (const match of matches) {
+                const functionStartIndex = match.functionStartIndex;
+                const functionStartLine = content.substring(0, functionStartIndex).split("\n").length;
 
-    static isNearDuplicate(a, b, overlapThreshold) {
-        if (a.locations.length !== b.locations.length) {
-            return false;
-        }
+                let braceCount = 0;
+                let functionEndLine = functionStartLine;
+                let inBlockComment = false;
+                let started = false;
 
-        const aSorted = DuplicateFinder.sortLocations(a.locations);
-        const bSorted = DuplicateFinder.sortLocations(b.locations);
+                for (let i = functionStartLine - 1; i < lines.length; i++) {
+                    const line = lines[i];
+                    const sanitizeResult = FunctionMetricsAnalyzer.stripCommentsAndStrings(line, inBlockComment);
+                    const sanitizedLine = sanitizeResult.line;
+                    inBlockComment = sanitizeResult.inBlockComment;
 
-        return aSorted.every((locA, index) => {
-            const locB = bSorted[index];
-            if (!locB) {
-                return false;
-            }
-            if (DuplicateFinder.locationKey(locA) !== DuplicateFinder.locationKey(locB)) {
-                return false;
-            }
-            return DuplicateFinder.overlapRatio(locA, locB) >= overlapThreshold;
-        });
-    }
+                    for (const char of sanitizedLine) {
+                        if (char === "{") {
+                            braceCount++;
+                            started = true;
+                        } else if (char === "}") {
+                            braceCount--;
+                        }
+                    }
 
-    static locationKey(loc) {
-        return loc.filePath || loc.fileName;
-    }
-
-    static sortLocations(locations) {
-        return [...locations].sort((a, b) => {
-            const fileA = DuplicateFinder.locationKey(a);
-            const fileB = DuplicateFinder.locationKey(b);
-            if (fileA !== fileB) {
-                return fileA.localeCompare(fileB);
-            }
-            return a.startLine - b.startLine;
-        });
-    }
-
-    static overlapRatio(a, b) {
-        const start = Math.max(a.startLine, b.startLine);
-        const end = Math.min(a.endLine, b.endLine);
-        const overlap = Math.max(0, end - start + 1);
-        const minLength = Math.min(a.length, b.length);
-        if (minLength === 0) {
-            return 0;
-        }
-        return overlap / minLength;
-    }
-
-    static removeContainedDuplicates(duplicates) {
-        const sorted = [...duplicates].sort((a, b) => {
-            const maxLengthA = Math.max(...a.locations.map((l) => l.length));
-            const maxLengthB = Math.max(...b.locations.map((l) => l.length));
-            return maxLengthB - maxLengthA;
-        });
-
-        const kept = [];
-        sorted.forEach((candidate) => {
-            const isContained = kept.some((existing) =>
-                DuplicateFinder.isContainedIn(candidate, existing)
-            );
-            if (!isContained) {
-                kept.push(candidate);
-            }
-        });
-
-        return kept;
-    }
-
-    static collapseOverlappingRuns(duplicates) {
-        const sorted = [...duplicates].sort((a, b) => {
-            const locA = a.locations[0];
-            const locB = b.locations[0];
-            if (!locA || !locB) {
-                return 0;
-            }
-            const fileA = DuplicateFinder.locationKey(locA);
-            const fileB = DuplicateFinder.locationKey(locB);
-            if (fileA !== fileB) {
-                return fileA.localeCompare(fileB);
-            }
-            return locA.startLine - locB.startLine;
-        });
-
-        const rangesByKey = new Map();
-        const kept = [];
-
-        sorted.forEach((candidate) => {
-            if (candidate.locations.length !== 2) {
-                kept.push(candidate);
-                return;
-            }
-
-            const locA = candidate.locations[0];
-            const locB = candidate.locations[1];
-            const fileA = DuplicateFinder.locationKey(locA);
-            const fileB = DuplicateFinder.locationKey(locB);
-            const key = `${fileA}::${fileB}::${locB.startLine - locA.startLine}`;
-
-            if (!rangesByKey.has(key)) {
-                rangesByKey.set(key, []);
-            }
-
-            const ranges = rangesByKey.get(key);
-            const last = ranges[ranges.length - 1];
-            if (last && locA.startLine <= last.endLine) {
-                if (locA.endLine > last.endLine) {
-                    last.endLine = locA.endLine;
+                    if (started && braceCount === 0) {
+                        functionEndLine = i + 1;
+                        break;
+                    }
                 }
-                return;
+
+                const totalLines = functionEndLine - functionStartLine + 1;
+                if (totalLines < minLines) {
+                    continue;
+                }
+
+                items.push({
+                    file: file.path || file.name,
+                    name: match.functionName,
+                    startLine: functionStartLine,
+                    endLine: functionEndLine,
+                    totalLines,
+                    content: lines.slice(functionStartLine - 1, functionEndLine).join("\n"),
+                });
+
+                total += 1;
+                if (total >= maxFunctions) {
+                    return {
+                        skipped: true,
+                        reason: "関数数が多いため類似度解析をスキップしました。",
+                        items: [],
+                    };
+                }
             }
-
-            ranges.push({ startLine: locA.startLine, endLine: locA.endLine });
-            kept.push(candidate);
-        });
-
-        return kept;
-    }
-
-    static isContainedIn(smaller, larger) {
-        if (smaller.locations.length !== larger.locations.length) {
-            return false;
         }
 
-        const smallSorted = DuplicateFinder.sortLocations(smaller.locations);
-        const largeSorted = DuplicateFinder.sortLocations(larger.locations);
+        return { items };
+    }
 
-        return smallSorted.every((locA, index) => {
-            const locB = largeSorted[index];
-            if (!locB) {
-                return false;
-            }
-            if (DuplicateFinder.locationKey(locA) !== DuplicateFinder.locationKey(locB)) {
-                return false;
-            }
-            const contained = locA.startLine >= locB.startLine && locA.endLine <= locB.endLine;
-            return contained;
+    static tokenize(content) {
+        const keywords = new Set([
+            "if",
+            "for",
+            "while",
+            "switch",
+            "case",
+            "break",
+            "continue",
+            "return",
+            "try",
+            "catch",
+            "throw",
+            "class",
+            "struct",
+            "public",
+            "private",
+            "protected",
+            "virtual",
+            "override",
+            "final",
+            "const",
+            "static",
+            "inline",
+            "constexpr",
+            "typename",
+            "template",
+            "using",
+            "namespace",
+            "new",
+            "delete",
+            "sizeof",
+            "operator",
+            "enum",
+            "typedef",
+            "auto",
+            "bool",
+            "char",
+            "int",
+            "long",
+            "short",
+            "float",
+            "double",
+            "void",
+            "unsigned",
+            "signed",
+        ]);
+
+        const lines = content.split("\n");
+        let inBlockComment = false;
+        const sanitized = [];
+
+        lines.forEach((line) => {
+            const result = FunctionMetricsAnalyzer.stripCommentsAndStrings(line, inBlockComment);
+            inBlockComment = result.inBlockComment;
+            sanitized.push(result.line);
         });
+
+        const tokenRegex = /[A-Za-z_]\w*|\d+|==|!=|<=|>=|&&|\|\||->|::|[{}()[\];,<>+\-*/%&|^!~?:.=]/g;
+        const tokens = [];
+        const text = sanitized.join("\n");
+        const matches = text.match(tokenRegex) || [];
+
+        matches.forEach((token) => {
+            if (/^\d+$/.test(token)) {
+                tokens.push("NUM");
+                return;
+            }
+            if (/^[A-Za-z_]\w*$/.test(token)) {
+                tokens.push(keywords.has(token) ? token : "ID");
+                return;
+            }
+            tokens.push(token);
+        });
+
+        return tokens;
+    }
+
+    static winnow(tokens, kgram, window) {
+        if (tokens.length < kgram) {
+            return { set: new Set(), count: 0 };
+        }
+
+        const hashes = [];
+        for (let i = 0; i <= tokens.length - kgram; i++) {
+            const gram = tokens.slice(i, i + kgram).join(" ");
+            hashes.push({ hash: SimilarityFinder.hashString(gram), pos: i });
+        }
+
+        if (hashes.length === 0) {
+            return { set: new Set(), count: 0 };
+        }
+
+        const selected = new Map();
+        let lastPos = -1;
+        const w = Math.max(1, window);
+
+        for (let i = 0; i <= hashes.length - w; i++) {
+            let min = hashes[i];
+            for (let j = 1; j < w; j++) {
+                const candidate = hashes[i + j];
+                if (candidate.hash < min.hash || (candidate.hash === min.hash && candidate.pos > min.pos)) {
+                    min = candidate;
+                }
+            }
+            if (min.pos !== lastPos) {
+                selected.set(min.hash, min.pos);
+                lastPos = min.pos;
+            }
+        }
+
+        return { set: new Set(selected.keys()), count: selected.size };
+    }
+
+    static hashString(text) {
+        let hash = 5381;
+        for (let i = 0; i < text.length; i++) {
+            hash = ((hash << 5) + hash) + text.charCodeAt(i);
+            hash &= 0xffffffff;
+        }
+        return hash >>> 0;
+    }
+
+    static computeSimilarPairs(functions, settings) {
+        const index = new Map();
+        const sizes = functions.map((fn) => fn.fingerprintCount || 0);
+
+        functions.forEach((fn, idx) => {
+            if (sizes[idx] < settings.minFingerprints) {
+                return;
+            }
+            fn.fingerprints.forEach((hash) => {
+                if (!index.has(hash)) {
+                    index.set(hash, []);
+                }
+                index.get(hash).push(idx);
+            });
+        });
+
+        const pairCounts = new Map();
+        index.forEach((list) => {
+            if (list.length > settings.maxBucketSize) {
+                return;
+            }
+            for (let i = 0; i < list.length; i++) {
+                for (let j = i + 1; j < list.length; j++) {
+                    const a = list[i];
+                    const b = list[j];
+                    const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+                    pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+                }
+            }
+        });
+
+        const results = [];
+        pairCounts.forEach((shared, key) => {
+            const parts = key.split("|");
+            const left = Number(parts[0]);
+            const right = Number(parts[1]);
+            const sizeA = sizes[left];
+            const sizeB = sizes[right];
+            if (sizeA < settings.minFingerprints || sizeB < settings.minFingerprints) {
+                return;
+            }
+            const union = sizeA + sizeB - shared;
+            if (union <= 0) {
+                return;
+            }
+            const similarity = shared / union;
+            if (similarity >= settings.similarityThreshold) {
+                results.push({ left, right, similarity });
+            }
+        });
+
+        results.sort((a, b) => b.similarity - a.similarity);
+        return results;
     }
 }
 
@@ -826,6 +902,332 @@ class SafetyScanner {
     }
 }
 
+class ErrorHandlingScanner {
+    static stripComments(text) {
+        return text
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/\/\/.*$/gm, "");
+    }
+
+    static scan(files) {
+        const findings = [];
+
+        files.forEach((file) => {
+            const content = file.content;
+            const catchRegex = /\bcatch\s*\([^)]*\)\s*\{([\s\S]*?)\}/g;
+            let match;
+
+            while ((match = catchRegex.exec(content)) !== null) {
+                const body = ErrorHandlingScanner.stripComments(match[1]).trim();
+                if (body.length === 0) {
+                    const lineNum = content.substring(0, match.index).split("\n").length;
+                    findings.push({
+                        file: file.path || file.name,
+                        lineNum,
+                        label: "空のcatchブロック",
+                    });
+                }
+            }
+        });
+
+        return {
+            count: findings.length,
+            findings,
+        };
+    }
+}
+
+class ParameterPassingAnalyzer {
+    static splitParams(params) {
+        const parts = [];
+        let current = "";
+        let depthAngle = 0;
+        let depthParen = 0;
+        let depthBracket = 0;
+        let depthBrace = 0;
+        let inString = false;
+        let stringChar = "";
+
+        for (let i = 0; i < params.length; i++) {
+            const char = params[i];
+            if (inString) {
+                current += char;
+                if (char === stringChar && params[i - 1] !== "\\") {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (char === "\"" || char === "'") {
+                inString = true;
+                stringChar = char;
+                current += char;
+                continue;
+            }
+
+            if (char === "<") depthAngle++;
+            else if (char === ">") depthAngle = Math.max(0, depthAngle - 1);
+            else if (char === "(") depthParen++;
+            else if (char === ")") depthParen = Math.max(0, depthParen - 1);
+            else if (char === "[") depthBracket++;
+            else if (char === "]") depthBracket = Math.max(0, depthBracket - 1);
+            else if (char === "{") depthBrace++;
+            else if (char === "}") depthBrace = Math.max(0, depthBrace - 1);
+
+            if (char === "," && depthAngle === 0 && depthParen === 0 && depthBracket === 0 && depthBrace === 0) {
+                parts.push(current.trim());
+                current = "";
+                continue;
+            }
+
+            current += char;
+        }
+
+        if (current.trim().length > 0) {
+            parts.push(current.trim());
+        }
+
+        return parts;
+    }
+
+    static stripDefaultValue(param) {
+        let depthAngle = 0;
+        let depthParen = 0;
+        let depthBracket = 0;
+        let depthBrace = 0;
+        let inString = false;
+        let stringChar = "";
+
+        for (let i = 0; i < param.length; i++) {
+            const char = param[i];
+            if (inString) {
+                if (char === stringChar && param[i - 1] !== "\\") {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (char === "\"" || char === "'") {
+                inString = true;
+                stringChar = char;
+                continue;
+            }
+
+            if (char === "<") depthAngle++;
+            else if (char === ">") depthAngle = Math.max(0, depthAngle - 1);
+            else if (char === "(") depthParen++;
+            else if (char === ")") depthParen = Math.max(0, depthParen - 1);
+            else if (char === "[") depthBracket++;
+            else if (char === "]") depthBracket = Math.max(0, depthBracket - 1);
+            else if (char === "{") depthBrace++;
+            else if (char === "}") depthBrace = Math.max(0, depthBrace - 1);
+
+            if (char === "=" && depthAngle === 0 && depthParen === 0 && depthBracket === 0 && depthBrace === 0) {
+                return param.slice(0, i).trim();
+            }
+        }
+
+        return param.trim();
+    }
+
+    static removeAttributes(text) {
+        return text.replace(/\[\[[^\]]*\]\]\s*/g, "");
+    }
+
+    static hasTopLevelRefOrPtr(text) {
+        let depthAngle = 0;
+        let depthParen = 0;
+        let depthBracket = 0;
+        let depthBrace = 0;
+        let inString = false;
+        let stringChar = "";
+
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            if (inString) {
+                if (char === stringChar && text[i - 1] !== "\\") {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (char === "\"" || char === "'") {
+                inString = true;
+                stringChar = char;
+                continue;
+            }
+
+            if (char === "<") depthAngle++;
+            else if (char === ">") depthAngle = Math.max(0, depthAngle - 1);
+            else if (char === "(") depthParen++;
+            else if (char === ")") depthParen = Math.max(0, depthParen - 1);
+            else if (char === "[") depthBracket++;
+            else if (char === "]") depthBracket = Math.max(0, depthBracket - 1);
+            else if (char === "{") depthBrace++;
+            else if (char === "}") depthBrace = Math.max(0, depthBrace - 1);
+
+            if (depthAngle === 0 && depthParen === 0 && depthBracket === 0 && depthBrace === 0) {
+                if (char === "&" || char === "*") {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    static extractParamName(param) {
+        const trimmed = param.trim();
+        const match = trimmed.match(/[\s\*&]([_A-Za-z]\w*)\s*$/);
+        return match ? match[1] : "";
+    }
+
+    static extractType(param) {
+        let text = ParameterPassingAnalyzer.stripDefaultValue(param);
+        text = ParameterPassingAnalyzer.removeAttributes(text);
+        const nameMatch = text.match(/(.*?)[\s\*&]([_A-Za-z]\w*)\s*$/);
+        if (nameMatch && nameMatch[1].trim().length > 0) {
+            return nameMatch[1].trim();
+        }
+        return text.trim();
+    }
+
+    static normalizeType(type) {
+        return type
+            .replace(/\b(const|volatile|mutable|static|constexpr|inline|typename|class|struct|enum)\b/g, " ")
+            .replace(/[*&]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+    }
+
+    static isPrimitiveType(type) {
+        const normalized = ParameterPassingAnalyzer.normalizeType(type).toLowerCase();
+        if (!normalized) {
+            return false;
+        }
+
+        const primitives = new Set([
+            "void",
+            "bool",
+            "char",
+            "wchar_t",
+            "char16_t",
+            "char32_t",
+            "short",
+            "int",
+            "long",
+            "long long",
+            "float",
+            "double",
+            "signed",
+            "unsigned",
+            "size_t",
+            "ssize_t",
+            "ptrdiff_t",
+            "intptr_t",
+            "uintptr_t",
+            "int8_t",
+            "uint8_t",
+            "int16_t",
+            "uint16_t",
+            "int32_t",
+            "uint32_t",
+            "int64_t",
+            "uint64_t",
+        ]);
+
+        if (primitives.has(normalized)) {
+            return true;
+        }
+
+        const stdTypedef = /(.*::)?(u?int(8|16|32|64)_t|size_t|ptrdiff_t|intptr_t|uintptr_t)$/;
+        return stdTypedef.test(normalized);
+    }
+
+    static isClassLikeType(type) {
+        if (!type) {
+            return false;
+        }
+        if (ParameterPassingAnalyzer.isPrimitiveType(type)) {
+            return false;
+        }
+
+        const raw = type.trim();
+        if (/\b(class|struct)\b/.test(raw)) {
+            return true;
+        }
+        if (raw.includes("::")) {
+            return true;
+        }
+        if (raw.includes("<") && raw.includes(">")) {
+            return true;
+        }
+        if (/\b[A-Z]\w*/.test(raw)) {
+            return true;
+        }
+        return false;
+    }
+
+    static scan(files) {
+        const findings = [];
+
+        files.forEach((file) => {
+            const content = file.content;
+            const matches = FunctionMetricsAnalyzer.findFunctionHeaders(content);
+
+            matches.forEach((match) => {
+                const signatureInfo = FunctionMetricsAnalyzer.extractSignature(content, match.functionStartIndex);
+                if (signatureInfo.endParen < 0) {
+                    return;
+                }
+
+                const startParen = content.indexOf("(", match.functionStartIndex);
+                if (startParen < 0) {
+                    return;
+                }
+
+                const params = content.slice(startParen + 1, signatureInfo.endParen);
+                if (!params.trim()) {
+                    return;
+                }
+
+                const functionStartLine = content.substring(0, match.functionStartIndex).split("\n").length;
+                const paramList = ParameterPassingAnalyzer.splitParams(params);
+
+                paramList.forEach((param) => {
+                    const cleaned = ParameterPassingAnalyzer.stripDefaultValue(param);
+                    if (!cleaned || cleaned === "void" || cleaned === "...") {
+                        return;
+                    }
+                    if (ParameterPassingAnalyzer.hasTopLevelRefOrPtr(cleaned)) {
+                        return;
+                    }
+
+                    const typePart = ParameterPassingAnalyzer.extractType(cleaned);
+                    if (!ParameterPassingAnalyzer.isClassLikeType(typePart)) {
+                        return;
+                    }
+
+                    const name = ParameterPassingAnalyzer.extractParamName(cleaned);
+                    findings.push({
+                        file: file.path || file.name,
+                        lineNum: functionStartLine,
+                        functionName: match.functionName,
+                        paramName: name,
+                        typeName: typePart,
+                        label: "クラス/構造体が値渡し",
+                    });
+                });
+            });
+        });
+
+        return {
+            count: findings.length,
+            findings,
+        };
+    }
+}
+
 class CandidateEvaluator {
     static evaluate(files, analysis, profileKey) {
         const profiles = CandidateEvaluator.getProfiles();
@@ -839,12 +1241,20 @@ class CandidateEvaluator {
         const functionMetrics = analysis.functionMetrics;
         const classIssues = analysis.classIssues;
         const safety = analysis.safety;
+        const errorHandling = analysis.errorHandling;
+        const paramPassing = analysis.paramPassing;
 
         const readabilityScore = CandidateEvaluator.scoreReadability(functionMetrics, profile);
         const designScore = CandidateEvaluator.scoreDesign(classIssues, profile);
         const complexityScore = CandidateEvaluator.scoreComplexity(functionMetrics, profile);
         const duplicationScore = CandidateEvaluator.scoreDuplication(duplicateRatio, profile);
-        const robustnessScore = CandidateEvaluator.scoreRobustness(functionMetrics, safety, profile);
+        const robustnessScore = CandidateEvaluator.scoreRobustness(
+            functionMetrics,
+            safety,
+            errorHandling,
+            paramPassing,
+            profile
+        );
 
         const totalScore = CandidateEvaluator.weightedScore({
             readability: readabilityScore,
@@ -854,7 +1264,14 @@ class CandidateEvaluator {
             robustness: robustnessScore,
         }, profile.weights);
 
-        const criticalIssues = CandidateEvaluator.countCriticalIssues(functionMetrics, classIssues, safety, profile);
+        const criticalIssues = CandidateEvaluator.countCriticalIssues(
+            functionMetrics,
+            classIssues,
+            safety,
+            errorHandling,
+            paramPassing,
+            profile
+        );
         const pass = totalScore >= profile.passScore && criticalIssues <= profile.maxCriticalIssues;
 
         return {
@@ -895,6 +1312,8 @@ class CandidateEvaluator {
                 hiddenMembers: classIssues.hiddenMembers.length,
                 nonVirtualDestructors: classIssues.nonVirtualDestructors.length,
                 safetyFindings: safety.count,
+                emptyCatch: errorHandling.count,
+                nonRefClassParams: paramPassing.count,
                 criticalIssues,
             },
         };
@@ -916,11 +1335,15 @@ class CandidateEvaluator {
                     maxComplexity: 20,
                     duplicateRatio: 0.08,
                     safetyFindings: 5,
+                    emptyCatch: 2,
+                    nonRefClassParams: 4,
                 },
                 critical: {
                     maxComplexity: 30,
                     safetyFindings: 10,
                     godClasses: 2,
+                    emptyCatch: 8,
+                    nonRefClassParams: 20,
                 },
                 weights: {
                     readability: 0.22,
@@ -944,11 +1367,15 @@ class CandidateEvaluator {
                     maxComplexity: 25,
                     duplicateRatio: 0.12,
                     safetyFindings: 10,
+                    emptyCatch: 3,
+                    nonRefClassParams: 6,
                 },
                 critical: {
                     maxComplexity: 40,
                     safetyFindings: 20,
                     godClasses: 3,
+                    emptyCatch: 10,
+                    nonRefClassParams: 25,
                 },
                 weights: {
                     readability: 0.22,
@@ -972,11 +1399,15 @@ class CandidateEvaluator {
                     maxComplexity: 30,
                     duplicateRatio: 0.18,
                     safetyFindings: 15,
+                    emptyCatch: 5,
+                    nonRefClassParams: 8,
                 },
                 critical: {
                     maxComplexity: 50,
                     safetyFindings: 30,
                     godClasses: 4,
+                    emptyCatch: 12,
+                    nonRefClassParams: 30,
                 },
                 weights: {
                     readability: 0.22,
@@ -1033,11 +1464,13 @@ class CandidateEvaluator {
         return CandidateEvaluator.clamp(100 - penalty, 0, 100);
     }
 
-    static scoreRobustness(functionMetrics, safety, profile) {
+    static scoreRobustness(functionMetrics, safety, errorHandling, paramPassing, profile) {
         const thresholds = profile.thresholds;
         let score = 100;
 
         score -= CandidateEvaluator.linearPenalty(safety.count, thresholds.safetyFindings, 35);
+        score -= CandidateEvaluator.linearPenalty(errorHandling.count, thresholds.emptyCatch, 15);
+        score -= CandidateEvaluator.linearPenalty(paramPassing.count, thresholds.nonRefClassParams, 15);
         score -= CandidateEvaluator.linearPenalty(functionMetrics.maxParams, thresholds.maxParams, 10);
 
         return CandidateEvaluator.clamp(score, 0, 100);
@@ -1059,7 +1492,7 @@ class CandidateEvaluator {
             + scores.robustness * weights.robustness;
     }
 
-    static countCriticalIssues(functionMetrics, classIssues, safety, profile) {
+    static countCriticalIssues(functionMetrics, classIssues, safety, errorHandling, paramPassing, profile) {
         let count = 0;
         const critical = profile.critical;
 
@@ -1070,6 +1503,12 @@ class CandidateEvaluator {
             count += 1;
         }
         if (classIssues.godClasses.length >= critical.godClasses) {
+            count += 1;
+        }
+        if (errorHandling.count >= critical.emptyCatch) {
+            count += 1;
+        }
+        if (paramPassing.count >= critical.nonRefClassParams) {
             count += 1;
         }
 
@@ -1153,11 +1592,19 @@ class CppAnalyzerCore {
         const safety = useLightMode
             ? { count: 0, findings: [] }
             : SafetyScanner.scan(files);
+        const errorHandling = useLightMode
+            ? { count: 0, findings: [] }
+            : ErrorHandlingScanner.scan(files);
+        const paramPassing = useLightMode
+            ? { count: 0, findings: [] }
+            : ParameterPassingAnalyzer.scan(files);
         const evaluation = CandidateEvaluator.evaluate(files, {
             duplicates,
             classIssues,
             functionMetrics,
             safety,
+            errorHandling,
+            paramPassing,
         }, profileKey);
 
         if (useLightMode) {
@@ -1170,6 +1617,8 @@ class CppAnalyzerCore {
             classIssues,
             functionMetrics,
             safety,
+            errorHandling,
+            paramPassing,
             evaluation,
         };
     }
@@ -1191,7 +1640,7 @@ class CppAnalyzerCore {
                 totalDuplicates: 0,
                 totalDuplicateLines: 0,
                 skipped: true,
-                reason: "データ量が多いため重複検出をスキップしました。",
+                reason: "データ量が多いため類似度解析をスキップしました。",
                 scopedTotalLines: totalLines,
             };
         }
@@ -1203,7 +1652,7 @@ class CppAnalyzerCore {
                 scopedTotalLines: 0,
             };
         }
-        const result = DuplicateFinder.find(sourceFiles, minLines);
+        const result = SimilarityFinder.find(sourceFiles, minLines);
         return {
             ...result,
             scopedTotalLines: totalLines,
